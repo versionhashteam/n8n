@@ -1,13 +1,18 @@
 import type { CreateFolderDto, DeleteFolderDto, UpdateFolderDto } from '@n8n/api-types';
-import { Folder, FolderTagMappingRepository, FolderRepository, type User } from '@n8n/db';
+import type {
+	FolderWithWorkflowAndSubFolderCount,
+	FolderWithWorkflowAndSubFolderCountAndPath,
+	User,
+} from '@n8n/db';
+import { Folder, FolderTagMappingRepository, FolderRepository, WorkflowRepository } from '@n8n/db';
 import { Service } from '@n8n/di';
 // eslint-disable-next-line n8n-local-rules/misplaced-n8n-typeorm-import
 import type { EntityManager } from '@n8n/typeorm';
 import { UserError, PROJECT_ROOT } from 'n8n-workflow';
 
-import { WorkflowRepository } from '@/databases/repositories/workflow.repository';
 import { FolderNotFoundError } from '@/errors/folder-not-found.error';
 import type { ListQuery } from '@/requests';
+// eslint-disable-next-line import-x/no-cycle
 import { WorkflowService } from '@/workflows/workflow.service';
 
 export interface SimpleFolderNode {
@@ -68,7 +73,16 @@ export class FolderService {
 
 			if (parentFolderId !== PROJECT_ROOT) {
 				await this.findFolderInProjectOrFail(parentFolderId, projectId);
+
+				// Ensure that the target parentFolder isn't a descendant of the current folder.
+				const parentFolderPath = await this.getFolderTree(parentFolderId, projectId);
+				if (this.isDescendant(folderId, parentFolderPath)) {
+					throw new UserError(
+						"Cannot set a folder's parent to a folder that is a descendant of the current folder",
+					);
+				}
 			}
+
 			await this.folderRepository.update(
 				{ id: folderId },
 				{ parentFolder: parentFolderId !== PROJECT_ROOT ? { id: parentFolderId } : null },
@@ -216,6 +230,15 @@ export class FolderService {
 		return rootNode ? [rootNode] : [];
 	}
 
+	private isDescendant(folderId: string, tree: SimpleFolderNode[]): boolean {
+		return tree.some((node) => {
+			if (node.id === folderId) {
+				return true;
+			}
+			return this.isDescendant(folderId, node.children);
+		});
+	}
+
 	async getFolderAndWorkflowCount(
 		folderId: string,
 		projectId: string,
@@ -281,6 +304,27 @@ export class FolderService {
 
 	async getManyAndCount(projectId: string, options: ListQuery.Options) {
 		options.filter = { ...options.filter, projectId, isArchived: false };
-		return await this.folderRepository.getManyAndCount(options);
+		// eslint-disable-next-line prefer-const
+		let [folders, count] = await this.folderRepository.getManyAndCount(options);
+		if (options.select?.path) {
+			folders = await this.enrichFoldersWithPaths(folders);
+		}
+		return [folders, count];
+	}
+
+	private async enrichFoldersWithPaths(
+		folders: FolderWithWorkflowAndSubFolderCount[],
+	): Promise<FolderWithWorkflowAndSubFolderCountAndPath[]> {
+		const folderIds = folders.map((folder) => folder.id);
+
+		const folderPaths = await this.folderRepository.getFolderPathsToRoot(folderIds);
+
+		return folders.map(
+			(folder) =>
+				({
+					...folder,
+					path: folderPaths.get(folder.id),
+				}) as FolderWithWorkflowAndSubFolderCountAndPath,
+		);
 	}
 }

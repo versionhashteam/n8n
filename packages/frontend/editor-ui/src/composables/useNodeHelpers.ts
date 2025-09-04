@@ -1,8 +1,12 @@
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import { useHistoryStore } from '@/stores/history.store';
-import { CUSTOM_API_CALL_KEY, PLACEHOLDER_FILLED_AT_EXECUTION_TIME } from '@/constants';
+import {
+	CUSTOM_API_CALL_KEY,
+	EnterpriseEditionFeature,
+	PLACEHOLDER_FILLED_AT_EXECUTION_TIME,
+} from '@/constants';
 
-import { NodeHelpers, ExpressionEvaluatorProxy, NodeConnectionTypes } from 'n8n-workflow';
+import { NodeHelpers, NodeConnectionTypes } from 'n8n-workflow';
 import type {
 	INodeProperties,
 	INodeCredentialDescription,
@@ -16,7 +20,6 @@ import type {
 	ITaskDataConnections,
 	IRunData,
 	IBinaryKeyData,
-	IDataObject,
 	INode,
 	INodePropertyOptions,
 	INodeCredentialsDetails,
@@ -26,11 +29,12 @@ import type {
 	NodeConnectionType,
 	IRunExecutionData,
 	NodeHint,
+	INodeCredentials,
 } from 'n8n-workflow';
 
 import type {
+	AddedNode,
 	ICredentialsResponse,
-	IExecutionResponse,
 	INodeUi,
 	INodeUpdatePropertiesInformation,
 	NodePanelType,
@@ -38,16 +42,15 @@ import type {
 
 import { isString } from '@/utils/typeGuards';
 import { isObject } from '@/utils/objectUtils';
-import { useSettingsStore } from '@/stores/settings.store';
 import { useWorkflowsStore } from '@/stores/workflows.store';
 import { useNodeTypesStore } from '@/stores/nodeTypes.store';
 import { useCredentialsStore } from '@/stores/credentials.store';
-import { get } from 'lodash-es';
-import { useI18n } from './useI18n';
+import { useI18n } from '@n8n/i18n';
 import { EnableNodeToggleCommand } from '@/models/history';
 import { useTelemetry } from './useTelemetry';
 import { hasPermission } from '@/utils/rbac/permissions';
 import { useCanvasStore } from '@/stores/canvas.store';
+import { useSettingsStore } from '@/stores/settings.store';
 
 declare namespace HttpRequestNode {
 	namespace V2 {
@@ -64,6 +67,7 @@ export function useNodeHelpers() {
 	const historyStore = useHistoryStore();
 	const nodeTypesStore = useNodeTypesStore();
 	const workflowsStore = useWorkflowsStore();
+	const settingsStore = useSettingsStore();
 	const i18n = useI18n();
 	const canvasStore = useCanvasStore();
 
@@ -71,6 +75,8 @@ export function useNodeHelpers() {
 	const credentialsUpdated = ref(false);
 	const isProductionExecutionPreview = ref(false);
 	const pullConnActiveNodeName = ref<string | null>(null);
+
+	const workflowObject = computed(() => workflowsStore.workflowObject as Workflow);
 
 	function hasProxyAuth(node: INodeUi): boolean {
 		return Object.keys(node.parameters).includes('nodeCredentialType');
@@ -93,8 +99,67 @@ export function useNodeHelpers() {
 		return false;
 	}
 
-	function getParameterValue(nodeValues: INodeParameters, parameterName: string, path: string) {
-		return get(nodeValues, path ? path + '.' + parameterName : parameterName);
+	/**
+	 * Determines whether a given node is considered executable in the workflow editor.
+	 *
+	 * A node is considered executable if:
+	 * - It structurally qualifies for execution (e.g. is a trigger, tool, or has a 'Main' input),
+	 *   AND
+	 * - It is either explicitly marked as `executable`, OR uses foreign credentials
+	 *   (credentials the current user cannot access, allowed under Workflow Sharing).
+	 *
+	 * @param node The node to check
+	 * @param executable Whether the node is in a state that allows execution (e.g. not readonly)
+	 * @param foreignCredentials List of credential IDs that the current user cannot access
+	 */
+	function isNodeExecutable(
+		node: INodeUi | null,
+		executable: boolean | undefined,
+		foreignCredentials: string[],
+	): boolean {
+		const nodeType = node ? nodeTypesStore.getNodeType(node.type, node.typeVersion) : null;
+		if (node && nodeType) {
+			const workflowNode = workflowObject.value.getNode(node.name);
+
+			const isTriggerNode = !!node && nodeTypesStore.isTriggerNode(node.type);
+			const isToolNode = !!node && nodeTypesStore.isToolNode(node.type);
+
+			if (workflowNode) {
+				const inputs = NodeHelpers.getNodeInputs(workflowObject.value, workflowNode, nodeType);
+				const inputNames = NodeHelpers.getConnectionTypes(inputs);
+
+				if (!inputNames.includes(NodeConnectionTypes.Main) && !isToolNode && !isTriggerNode) {
+					return false;
+				}
+			}
+		}
+
+		return Boolean(executable || foreignCredentials.length > 0);
+	}
+
+	/**
+	 * Returns a list of credential IDs that the current user does not have access to,
+	 * if the Sharing feature is enabled.
+	 *
+	 * These are considered "foreign" credentials: the user can't view or manage them,
+	 * but can still execute workflows that use them.
+	 */
+	function getForeignCredentialsIfSharingEnabled(
+		credentials: INodeCredentials | undefined,
+	): string[] {
+		if (
+			!credentials ||
+			!settingsStore.isEnterpriseFeatureEnabled[EnterpriseEditionFeature.Sharing]
+		) {
+			return [];
+		}
+
+		const usedCredentials = workflowsStore.usedCredentials;
+
+		return Object.values(credentials)
+			.map(({ id }) => id)
+			.filter((id) => id !== null)
+			.filter((id) => id in usedCredentials && !usedCredentials[id]?.currentUserHasAccess);
 	}
 
 	// Returns if the given parameter should be displayed or not
@@ -182,7 +247,7 @@ export function useNodeHelpers() {
 	function hasNodeExecutionIssues(node: INodeUi): boolean {
 		const workflowResultData = workflowsStore.getWorkflowRunData;
 
-		if (workflowResultData === null || !workflowResultData.hasOwnProperty(node.name)) {
+		if (!workflowResultData?.hasOwnProperty(node.name)) {
 			return false;
 		}
 
@@ -215,8 +280,7 @@ export function useNodeHelpers() {
 			return;
 		}
 
-		const workflow = workflowsStore.getCurrentWorkflow();
-		const nodeInputIssues = getNodeInputIssues(workflow, node, nodeType);
+		const nodeInputIssues = getNodeInputIssues(workflowObject.value, node, nodeType);
 
 		workflowsStore.setNodeIssue({
 			node: node.name,
@@ -543,12 +607,12 @@ export function useNodeHelpers() {
 		}
 	}
 
-	function getNodeTaskData(nodeName: string, runIndex = 0, execution?: IExecutionResponse) {
+	function getNodeTaskData(nodeName: string, runIndex = 0, execution?: IRunExecutionData) {
 		return getAllNodeTaskData(nodeName, execution)?.[runIndex] ?? null;
 	}
 
-	function getAllNodeTaskData(nodeName: string, execution?: IExecutionResponse) {
-		const runData = execution?.data?.resultData.runData ?? workflowsStore.getWorkflowRunData;
+	function getAllNodeTaskData(nodeName: string, execution?: IRunExecutionData) {
+		const runData = execution?.resultData.runData ?? workflowsStore.getWorkflowRunData;
 
 		return runData?.[nodeName] ?? null;
 	}
@@ -580,7 +644,7 @@ export function useNodeHelpers() {
 		outputIndex = 0,
 		paneType: NodePanelType = 'output',
 		connectionType: NodeConnectionType = NodeConnectionTypes.Main,
-		execution?: IExecutionResponse,
+		execution?: IRunExecutionData,
 	): INodeExecutionData[] {
 		if (!node) return [];
 		const taskData = getNodeTaskData(node.name, runIndex, execution);
@@ -657,8 +721,8 @@ export function useNodeHelpers() {
 				name: node.name,
 				properties: {
 					disabled: newDisabledState,
-				} as IDataObject,
-			} as INodeUpdatePropertiesInformation;
+				},
+			};
 
 			telemetry.track('User set node enabled status', {
 				node_type: node.type,
@@ -703,9 +767,6 @@ export function useNodeHelpers() {
 
 		if (nodeType?.subtitle !== undefined) {
 			try {
-				ExpressionEvaluatorProxy.setEvaluator(
-					useSettingsStore().settings.expressions?.evaluator ?? 'tmpl',
-				);
 				return workflow.expression.getSimpleParameterValue(
 					data,
 					nodeType.subtitle,
@@ -991,10 +1052,26 @@ export function useNodeHelpers() {
 		return nodeIssues;
 	}
 
+	function getDefaultNodeName(node: AddedNode | INode) {
+		const nodeType = nodeTypesStore.getNodeType(node.type, node.typeVersion);
+		if (nodeType === null) return null;
+		const parameters = NodeHelpers.getNodeParameters(
+			nodeType?.properties,
+			node.parameters ?? {},
+			true,
+			false,
+			node.typeVersion ? { typeVersion: node.typeVersion } : null,
+			nodeType,
+		);
+
+		return NodeHelpers.makeNodeName(parameters ?? {}, nodeType);
+	}
+
 	return {
 		hasProxyAuth,
 		isCustomApiCallSelected,
-		getParameterValue,
+		isNodeExecutable,
+		getForeignCredentialsIfSharingEnabled,
 		displayParameter,
 		getNodeIssues,
 		updateNodesInputIssues,
@@ -1024,5 +1101,6 @@ export function useNodeHelpers() {
 		isSingleExecution,
 		getNodeHints,
 		nodeIssuesToString,
+		getDefaultNodeName,
 	};
 }

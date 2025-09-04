@@ -1,4 +1,6 @@
 import type { CreateProjectDto, ProjectType, UpdateProjectDto } from '@n8n/api-types';
+import { LicenseState } from '@n8n/backend-common';
+import { DatabaseConfig } from '@n8n/config';
 import { UNLIMITED_LICENSE_QUOTA } from '@n8n/constants';
 import type { User } from '@n8n/db';
 import {
@@ -10,19 +12,27 @@ import {
 	SharedWorkflowRepository,
 } from '@n8n/db';
 import { Container, Service } from '@n8n/di';
-import { hasGlobalScope, rolesWithScope, type Scope, type ProjectRole } from '@n8n/permissions';
+import {
+	hasGlobalScope,
+	rolesWithScope,
+	type Scope,
+	type ProjectRole,
+	AssignableProjectRole,
+	PROJECT_OWNER_ROLE_SLUG,
+	PROJECT_ADMIN_ROLE_SLUG,
+} from '@n8n/permissions';
 // eslint-disable-next-line n8n-local-rules/misplaced-n8n-typeorm-import
 import type { FindOptionsWhere, EntityManager } from '@n8n/typeorm';
 // eslint-disable-next-line n8n-local-rules/misplaced-n8n-typeorm-import
-import { In, Not } from '@n8n/typeorm';
+import { In } from '@n8n/typeorm';
 import { UserError } from 'n8n-workflow';
 
 import { BadRequestError } from '@/errors/response-errors/bad-request.error';
 import { ForbiddenError } from '@/errors/response-errors/forbidden.error';
 import { NotFoundError } from '@/errors/response-errors/not-found.error';
-import { License } from '@/license';
 
 import { CacheService } from './cache/cache.service';
+import { RoleService } from './role.service';
 
 export class TeamProjectOverQuotaError extends UserError {
 	constructor(limit: number) {
@@ -33,8 +43,23 @@ export class TeamProjectOverQuotaError extends UserError {
 }
 
 export class UnlicensedProjectRoleError extends UserError {
-	constructor(role: ProjectRole) {
+	constructor(role: ProjectRole | AssignableProjectRole) {
 		super(`Your instance is not licensed to use role "${role}".`);
+	}
+}
+
+class ProjectNotFoundError extends NotFoundError {
+	constructor(projectId: string) {
+		super(`Could not find project with ID: ${projectId}`);
+	}
+
+	static isDefinedAndNotNull<T>(
+		value: T | undefined | null,
+		projectId: string,
+	): asserts value is T {
+		if (value === undefined || value === null) {
+			throw new ProjectNotFoundError(projectId);
+		}
 	}
 }
 
@@ -44,9 +69,11 @@ export class ProjectService {
 		private readonly sharedWorkflowRepository: SharedWorkflowRepository,
 		private readonly projectRepository: ProjectRepository,
 		private readonly projectRelationRepository: ProjectRelationRepository,
+		private readonly roleService: RoleService,
 		private readonly sharedCredentialsRepository: SharedCredentialsRepository,
 		private readonly cacheService: CacheService,
-		private readonly license: License,
+		private readonly licenseState: LicenseState,
+		private readonly databaseConfig: DatabaseConfig,
 	) {}
 
 	private get workflowService() {
@@ -82,9 +109,7 @@ export class ProjectService {
 		}
 
 		const project = await this.getProjectWithScope(user, projectId, ['project:delete']);
-		if (!project) {
-			throw new NotFoundError(`Could not find project with ID: ${projectId}`);
-		}
+		ProjectNotFoundError.isDefinedAndNotNull(project, projectId);
 
 		let targetProject: Project | null = null;
 		if (migrateToProject) {
@@ -179,35 +204,59 @@ export class ProjectService {
 		return await this.projectRelationRepository.getPersonalProjectOwners(projectIds);
 	}
 
-	async createTeamProject(adminUser: User, data: CreateProjectDto): Promise<Project> {
-		const limit = this.license.getTeamProjectLimit();
-		if (
-			limit !== UNLIMITED_LICENSE_QUOTA &&
-			limit <= (await this.projectRepository.count({ where: { type: 'team' } }))
-		) {
-			throw new TeamProjectOverQuotaError(limit);
+	private async createTeamProjectWithEntityManager(
+		adminUser: User,
+		data: CreateProjectDto,
+		trx: EntityManager,
+	) {
+		const limit = this.licenseState.getMaxTeamProjects();
+		if (limit !== UNLIMITED_LICENSE_QUOTA) {
+			const teamProjectCount = await trx.count(Project, { where: { type: 'team' } });
+			if (teamProjectCount >= limit) {
+				throw new TeamProjectOverQuotaError(limit);
+			}
 		}
 
-		const project = await this.projectRepository.save(
+		const project = await trx.save(
+			Project,
 			this.projectRepository.create({ ...data, type: 'team' }),
 		);
 
 		// Link admin
-		await this.addUser(project.id, adminUser.id, 'project:admin');
+		await this.addUser(project.id, { userId: adminUser.id, role: 'project:admin' }, trx);
 
 		return project;
 	}
 
+	async createTeamProject(adminUser: User, data: CreateProjectDto): Promise<Project> {
+		if (this.databaseConfig.isLegacySqlite) {
+			// Using transaction in the sqlite legacy driver can cause data loss, so
+			// we avoid this here.
+			return await this.createTeamProjectWithEntityManager(
+				adminUser,
+				data,
+				this.projectRepository.manager,
+			);
+		} else {
+			// This needs to be SERIALIZABLE otherwise the count would not block a
+			// concurrent transaction and we could insert multiple projects.
+			return await this.projectRepository.manager.transaction('SERIALIZABLE', async (trx) => {
+				return await this.createTeamProjectWithEntityManager(adminUser, data, trx);
+			});
+		}
+	}
+
 	async updateProject(
 		projectId: string,
-		data: Pick<UpdateProjectDto, 'name' | 'icon'>,
-	): Promise<Project> {
-		const result = await this.projectRepository.update({ id: projectId, type: 'team' }, data);
-
+		{ name, icon, description }: UpdateProjectDto,
+	): Promise<void> {
+		const result = await this.projectRepository.update(
+			{ id: projectId, type: 'team' },
+			{ name, icon, description },
+		);
 		if (!result.affected) {
-			throw new ForbiddenError('Project not found');
+			throw new ProjectNotFoundError(projectId);
 		}
-		return await this.projectRepository.findOneByOrFail({ id: projectId });
 	}
 
 	async getPersonalProject(user: User): Promise<Project | null> {
@@ -217,47 +266,134 @@ export class ProjectService {
 	async getProjectRelationsForUser(user: User): Promise<ProjectRelation[]> {
 		return await this.projectRelationRepository.find({
 			where: { userId: user.id },
-			relations: ['project'],
+			relations: ['project', 'role'],
 		});
 	}
 
 	async syncProjectRelations(
 		projectId: string,
-		relations: Array<{ userId: string; role: ProjectRole }>,
-	) {
-		const project = await this.projectRepository.findOneOrFail({
-			where: { id: projectId, type: Not('personal') },
-			relations: { projectRelations: true },
-		});
+		relations: Array<{ role: AssignableProjectRole; userId: string }>,
+	): Promise<{
+		project: Project;
+		newRelations: Array<{ role: AssignableProjectRole; userId: string }>;
+	}> {
+		const project = await this.getTeamProjectWithRelations(projectId);
+		this.checkRolesLicensed(project, relations);
 
-		// Check to see if the instance is licensed to use all roles provided
-		for (const r of relations) {
-			const existing = project.projectRelations.find((pr) => pr.userId === r.userId);
-			// We don't throw an error if the user already exists with that role so
-			// existing projects continue working as is.
-			if (existing?.role !== r.role && !this.isProjectRoleLicensed(r.role)) {
-				throw new UnlicensedProjectRoleError(r.role);
-			}
-		}
+		// Check that all roles exist
+		await this.roleService.checkRolesExist(
+			relations.map((r) => r.role),
+			'project',
+		);
 
 		await this.projectRelationRepository.manager.transaction(async (em) => {
 			await this.pruneRelations(em, project);
 			await this.addManyRelations(em, project, relations);
 		});
+
+		const newRelations = relations.filter(
+			(relation) => !project.projectRelations.some((r) => r.userId === relation.userId),
+		);
 		await this.clearCredentialCanUseExternalSecretsCache(projectId);
+
+		return { project, newRelations };
 	}
 
-	private isProjectRoleLicensed(role: ProjectRole) {
-		switch (role) {
-			case 'project:admin':
-				return this.license.isProjectRoleAdminLicensed();
-			case 'project:editor':
-				return this.license.isProjectRoleEditorLicensed();
-			case 'project:viewer':
-				return this.license.isProjectRoleViewerLicensed();
-			default:
-				return true;
+	/**
+	 * Adds users to a team project with specified roles.
+	 *
+	 * Throws if you the project is a personal project.
+	 * Throws if the relations contain `project:personalOwner`.
+	 */
+	async addUsersToProject(
+		projectId: string,
+		relations: Array<{ userId: string; role: AssignableProjectRole }>,
+	) {
+		const project = await this.getTeamProjectWithRelations(projectId);
+		this.checkRolesLicensed(project, relations);
+
+		// Check that project role exists
+		await this.roleService.checkRolesExist(
+			relations.map((r) => r.role),
+			'project',
+		);
+
+		if (project.type === 'personal') {
+			throw new ForbiddenError("Can't add users to personal projects.");
 		}
+
+		if (relations.some((r) => r.role === PROJECT_OWNER_ROLE_SLUG)) {
+			throw new ForbiddenError("Can't add a personalOwner to a team project.");
+		}
+
+		await this.projectRelationRepository.save(
+			relations.map((relation) => ({
+				projectId,
+				userId: relation.userId,
+				role: { slug: relation.role },
+			})),
+		);
+	}
+
+	private async getTeamProjectWithRelations(projectId: string) {
+		const project = await this.projectRepository.findOne({
+			where: { id: projectId, type: 'team' },
+			relations: { projectRelations: { role: true } },
+		});
+		ProjectNotFoundError.isDefinedAndNotNull(project, projectId);
+		return project;
+	}
+
+	/** Check to see if the instance is licensed to use all roles provided */
+	private checkRolesLicensed(
+		project: Project,
+		relations: Array<{ role: AssignableProjectRole; userId: string }>,
+	) {
+		for (const { role, userId } of relations) {
+			const existing = project.projectRelations.find((pr) => pr.userId === userId);
+			// We don't throw an error if the user already exists with that role so
+			// existing projects continue working as is.
+			if (existing?.role?.slug !== role && !this.roleService.isRoleLicensed(role)) {
+				throw new UnlicensedProjectRoleError(role);
+			}
+		}
+	}
+
+	private isUserProjectOwner(project: Project, userId: string) {
+		return project.projectRelations.some(
+			(pr) => pr.userId === userId && pr.role.slug === PROJECT_OWNER_ROLE_SLUG,
+		);
+	}
+
+	async deleteUserFromProject(projectId: string, userId: string) {
+		const project = await this.getTeamProjectWithRelations(projectId);
+
+		// Prevent project owner from being removed
+		if (this.isUserProjectOwner(project, userId)) {
+			throw new ForbiddenError('Project owner cannot be removed from the project');
+		}
+
+		await this.projectRelationRepository.delete({ projectId: project.id, userId });
+	}
+
+	async changeUserRoleInProject(projectId: string, userId: string, role: AssignableProjectRole) {
+		if (role === PROJECT_OWNER_ROLE_SLUG) {
+			throw new ForbiddenError('Personal owner cannot be added to a team project.');
+		}
+
+		const project = await this.getTeamProjectWithRelations(projectId);
+
+		// Check that project role exists
+		await this.roleService.checkRolesExist([role], 'project');
+
+		ProjectNotFoundError.isDefinedAndNotNull(project, projectId);
+
+		const projectUserExists = project.projectRelations.some((r) => r.userId === userId);
+		if (!projectUserExists) {
+			throw new ProjectNotFoundError(projectId);
+		}
+
+		await this.projectRelationRepository.update({ projectId, userId }, { role: { slug: role } });
 	}
 
 	async clearCredentialCanUseExternalSecretsCache(projectId: string) {
@@ -282,15 +418,16 @@ export class ProjectService {
 	async addManyRelations(
 		em: EntityManager,
 		project: Project,
-		relations: Array<{ userId: string; role: ProjectRole }>,
+		relations: Array<{ userId: string; role: AssignableProjectRole }>,
 	) {
 		await em.insert(
 			ProjectRelation,
+			// @ts-ignore CAT-957
 			relations.map((v) =>
 				this.projectRelationRepository.create({
 					projectId: project.id,
 					userId: v.userId,
-					role: v.role,
+					role: { slug: v.role },
 				}),
 			),
 		);
@@ -324,11 +461,22 @@ export class ProjectService {
 		});
 	}
 
-	async addUser(projectId: string, userId: string, role: ProjectRole) {
-		return await this.projectRelationRepository.save({
+	/**
+	 * Add a user to a team project with specified roles.
+	 *
+	 * Throws if you the project is a personal project.
+	 * Throws if the relations contain `project:personalOwner`.
+	 */
+	async addUser(
+		projectId: string,
+		{ userId, role }: { userId: string; role: AssignableProjectRole },
+		trx?: EntityManager,
+	) {
+		trx = trx ?? this.projectRelationRepository.manager;
+		return await trx.save(ProjectRelation, {
 			projectId,
 			userId,
-			role,
+			role: { slug: role },
 		});
 	}
 
@@ -343,7 +491,17 @@ export class ProjectService {
 	async getProjectRelations(projectId: string): Promise<ProjectRelation[]> {
 		return await this.projectRelationRepository.find({
 			where: { projectId },
-			relations: { user: true },
+			relations: { user: true, role: true },
+		});
+	}
+
+	async getProjectRelationForUserAndProject(
+		userId: string,
+		projectId: string,
+	): Promise<ProjectRelation | null> {
+		return await this.projectRelationRepository.findOne({
+			where: { projectId, userId },
+			relations: { user: true, role: true },
 		});
 	}
 
@@ -352,7 +510,7 @@ export class ProjectService {
 			where: {
 				projectRelations: {
 					userId,
-					role: In(['project:personalOwner', 'project:admin']),
+					role: In([PROJECT_OWNER_ROLE_SLUG, PROJECT_ADMIN_ROLE_SLUG]),
 				},
 			},
 		});

@@ -45,6 +45,9 @@
         "$layout_id": {
             "type": "object",
             "properties": {
+                "display_label": {
+                    "type": "string"
+                },
                 "id": {
                     "type": "string"
                 },
@@ -102,6 +105,9 @@
         "Full_Name": {
             "type": "string"
         },
+        "Home_Phone": {
+            "type": "null"
+        },
         "id": {
             "type": "string"
         },
@@ -128,6 +134,9 @@
         "Modified_Time": {
             "type": "string"
         },
+        "Other_Phone": {
+            "type": "null"
+        },
         "Owner": {
             "type": "object",
             "properties": {
@@ -142,23 +151,15 @@
                 }
             }
         },
-        "Tag": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string"
-                    },
-                    "name": {
-                        "type": "string"
-                    }
-                }
-            }
+        "Unsubscribed_Mode": {
+            "type": "null"
+        },
+        "Unsubscribed_Time": {
+            "type": "null"
         },
         "Vendor_Name": {
             "type": "null"
         }
     },
-    "version": 3
+    "version": 6
 }

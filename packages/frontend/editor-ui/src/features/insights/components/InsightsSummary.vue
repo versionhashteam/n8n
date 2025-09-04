@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useI18n } from '@/composables/useI18n';
+import { useI18n } from '@n8n/i18n';
 import { useTelemetry } from '@/composables/useTelemetry';
 import { VIEWS } from '@/constants';
 import {
@@ -12,6 +12,7 @@ import type { InsightsDateRange, InsightsSummary } from '@n8n/api-types';
 import { smartDecimal } from '@n8n/utils/number/smartDecimal';
 import { computed, useCssModule } from 'vue';
 import { useRoute } from 'vue-router';
+import { I18nT } from 'vue-i18n';
 
 const props = defineProps<{
 	summary: InsightsSummaryDisplay;
@@ -68,13 +69,21 @@ const trackTabClick = (insightType: keyof InsightsSummary) => {
 <template>
 	<div :class="$style.insights">
 		<ul data-test-id="insights-summary-tabs">
-			<N8nLoading v-if="loading" :class="$style.loading" :cols="5" />
-			<template v-else>
-				<li
-					v-for="{ id, value, deviation, deviationUnit, unit, to } in summaryWithRouteLocations"
-					:key="id"
-					:data-test-id="`insights-summary-tab-${id}`"
-				>
+			<li
+				v-for="{ id, value, deviation, deviationUnit, unit, to } in summaryWithRouteLocations"
+				:key="id"
+				:data-test-id="`insights-summary-tab-${id}`"
+			>
+				<N8nTooltip placement="top" :disabled="!(summaryHasNoData && id === 'total')">
+					<template #content>
+						<I18nT keypath="insights.banner.noData.tooltip" scope="global">
+							<template #link>
+								<a :href="i18n.baseText('insights.banner.noData.tooltip.link.url')" target="_blank">
+									{{ i18n.baseText('insights.banner.noData.tooltip.link') }}
+								</a>
+							</template>
+						</I18nT>
+					</template>
 					<router-link :to="to" :exact-active-class="$style.activeTab" @click="trackTabClick(id)">
 						<strong>
 							<N8nTooltip placement="bottom" :disabled="id !== 'timeSaved'">
@@ -87,26 +96,18 @@ const trackTabClick = (insightType: keyof InsightsSummary) => {
 						<small :class="$style.days">
 							{{ TIME_RANGE_LABELS[timeRange] }}
 						</small>
-						<span v-if="summaryHasNoData" :class="$style.noData">
-							<N8nTooltip placement="bottom">
-								<template #content>
-									{{ i18n.baseText('insights.banner.noData.tooltip') }}
-								</template>
-								<em>{{ i18n.baseText('insights.banner.noData') }}</em>
-							</N8nTooltip>
-						</span>
-						<span v-else-if="value === 0 && id === 'timeSaved'" :class="$style.empty">
+						<span v-if="value === 0 && id === 'timeSaved'" :class="$style.empty">
 							<em>--</em>
 							<small>
 								<N8nTooltip placement="bottom">
 									<template #content>
-										<i18n-t keypath="insights.banner.timeSaved.tooltip">
+										<I18nT keypath="insights.banner.timeSaved.tooltip" scope="global">
 											<template #link>{{
 												i18n.baseText('insights.banner.timeSaved.tooltip.link.text')
 											}}</template>
-										</i18n-t>
+										</I18nT>
 									</template>
-									<N8nIcon :class="$style.icon" icon="info-circle" />
+									<N8nIcon :class="$style.icon" icon="info" size="medium" />
 								</N8nTooltip>
 							</small>
 						</span>
@@ -118,7 +119,11 @@ const trackTabClick = (insightType: keyof InsightsSummary) => {
 								<N8nIcon
 									:class="[$style.icon, getImpactStyle(id, deviation)]"
 									:icon="
-										deviation === 0 ? 'caret-right' : deviation > 0 ? 'caret-up' : 'caret-down'
+										deviation === 0
+											? 'chevron-right'
+											: deviation > 0
+												? 'chevron-up'
+												: 'chevron-down'
 									"
 								/>
 								<N8nTooltip placement="bottom" :disabled="id !== 'failureRate'">
@@ -130,8 +135,8 @@ const trackTabClick = (insightType: keyof InsightsSummary) => {
 							</small>
 						</span>
 					</router-link>
-				</li>
-			</template>
+				</N8nTooltip>
+			</li>
 		</ul>
 	</div>
 </template>
@@ -208,6 +213,9 @@ const trackTabClick = (insightType: keyof InsightsSummary) => {
 				&.empty {
 					em {
 						color: var(--color-text-lighter);
+						body[data-theme='dark'] & {
+							color: var(--color-text-light);
+						}
 					}
 					small {
 						padding: 0;
@@ -215,8 +223,6 @@ const trackTabClick = (insightType: keyof InsightsSummary) => {
 						font-weight: var(--font-weight-bold);
 
 						.icon {
-							height: 20px;
-							width: 8px;
 							top: 5px;
 							transform: translateY(0);
 							color: var(--color-text-light);

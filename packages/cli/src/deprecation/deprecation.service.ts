@@ -1,6 +1,7 @@
+import { Logger } from '@n8n/backend-common';
 import { GlobalConfig } from '@n8n/config';
 import { Service } from '@n8n/di';
-import { Logger } from 'n8n-core';
+import { InstanceSettings } from 'n8n-core';
 
 import config from '@/config';
 
@@ -47,6 +48,12 @@ export class DeprecationService {
 			checkValue: (value: string) => ['mysqldb', 'mariadb'].includes(value),
 		},
 		{
+			envVar: 'DB_SQLITE_POOL_SIZE',
+			message:
+				'Running SQLite without a pool of read connections is deprecated. Please set `DB_SQLITE_POOL_SIZE` to a value higher than zero. See: https://docs.n8n.io/hosting/configuration/environment-variables/database/#sqlite',
+			checkValue: (_: string) => this.globalConfig.database.isLegacySqlite,
+		},
+		{
 			envVar: 'N8N_SKIP_WEBHOOK_DEREGISTRATION_SHUTDOWN',
 			message: `n8n no longer deregisters webhooks at startup and shutdown. ${SAFE_TO_REMOVE}`,
 		},
@@ -65,6 +72,7 @@ export class DeprecationService {
 			checkValue: (value?: string) => value?.toLowerCase() !== 'true' && value !== '1',
 			warnIfMissing: true,
 			matchConfig: config.getEnv('executions.mode') === 'queue',
+			disableIf: () => this.instanceSettings.instanceType !== 'main',
 		},
 		{
 			envVar: 'N8N_PARTIAL_EXECUTION_VERSION_DEFAULT',
@@ -77,6 +85,14 @@ export class DeprecationService {
 			message: 'This environment variable is internal and should not be set.',
 		},
 		{
+			envVar: 'N8N_EXPRESSION_EVALUATOR',
+			message: `n8n has replaced \`tmpl\` with \`tournament\` as expression evaluator. ${SAFE_TO_REMOVE}`,
+		},
+		{
+			envVar: 'N8N_EXPRESSION_REPORT_DIFFERENCE',
+			message: `n8n has replaced \`tmpl\` with \`tournament\` as expression evaluator. ${SAFE_TO_REMOVE}`,
+		},
+		{
 			envVar: 'EXECUTIONS_PROCESS',
 			message: SAFE_TO_REMOVE,
 			checkValue: (value: string | undefined) => value !== undefined && value !== 'own',
@@ -87,6 +103,12 @@ export class DeprecationService {
 				'n8n does not support `own` mode since May 2023. Please remove this environment variable to allow n8n to start. If you need the isolation and performance gains, please consider queue mode: https://docs.n8n.io/hosting/scaling/queue-mode/',
 			checkValue: (value: string) => value === 'own',
 		},
+		{
+			envVar: 'N8N_BLOCK_ENV_ACCESS_IN_NODE',
+			message:
+				'The default value of N8N_BLOCK_ENV_ACCESS_IN_NODE will be changed from false to true in a future version. If you need to access environment variables from the Code Node or from expressions, please set N8N_BLOCK_ENV_ACCESS_IN_NODE=false. Learn more: https://docs.n8n.io/hosting/configuration/environment-variables/security/',
+			checkValue: (value: string | undefined) => value === undefined || value === '',
+		},
 	];
 
 	/** Runtime state of deprecation-related env vars. */
@@ -95,6 +117,7 @@ export class DeprecationService {
 	constructor(
 		private readonly logger: Logger,
 		private readonly globalConfig: GlobalConfig,
+		private readonly instanceSettings: InstanceSettings,
 	) {}
 
 	warn() {

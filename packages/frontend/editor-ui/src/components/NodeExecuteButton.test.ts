@@ -124,7 +124,7 @@ describe('NodeExecuteButton', () => {
 
 	it('displays correct button label for regular node', () => {
 		const { getByRole } = renderComponent();
-		expect(getByRole('button').textContent).toBe('Test step');
+		expect(getByRole('button').textContent).toBe('Execute step');
 	});
 
 	it('displays correct button label for webhook node', () => {
@@ -148,7 +148,7 @@ describe('NodeExecuteButton', () => {
 		});
 
 		const { getByRole } = renderComponent();
-		expect(getByRole('button').textContent).toBe('Test step');
+		expect(getByRole('button').textContent).toBe('Execute step');
 	});
 
 	it('displays correct button label for chat node', () => {
@@ -316,7 +316,7 @@ describe('NodeExecuteButton', () => {
 
 		await userEvent.click(getByRole('button'));
 
-		expect(ndvStore.setActiveNodeName).toHaveBeenCalledWith(null);
+		expect(ndvStore.unsetActiveNodeName).toHaveBeenCalled();
 		expect(workflowsStore.chatPartialExecutionDestinationNode).toBe(node.name);
 		expect(nodeViewEventBusEmitSpy).toHaveBeenCalledWith('openChat');
 	});
@@ -330,7 +330,7 @@ describe('NodeExecuteButton', () => {
 
 		await userEvent.click(getByRole('button'));
 
-		expect(ndvStore.setActiveNodeName).toHaveBeenCalledWith(null);
+		expect(ndvStore.unsetActiveNodeName).toHaveBeenCalled();
 		expect(workflowsStore.chatPartialExecutionDestinationNode).toBe(node.name);
 		expect(nodeViewEventBusEmitSpy).toHaveBeenCalledWith('openChat');
 	});

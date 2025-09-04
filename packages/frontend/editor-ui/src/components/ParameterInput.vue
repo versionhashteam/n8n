@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, onUpdated, ref, watch } from 'vue';
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, onUpdated, ref, watch } from 'vue';
 
-import { get } from 'lodash-es';
+import get from 'lodash/get';
 
 import type {
 	INodeUi,
@@ -11,20 +11,24 @@ import type {
 } from '@/Interface';
 import type {
 	CodeExecutionMode,
-	CodeNodeEditorLanguage,
 	EditorType,
 	IDataObject,
 	ILoadOptions,
 	INodeParameterResourceLocator,
 	INodeParameters,
 	INodeProperties,
-	INodePropertyCollection,
 	INodePropertyOptions,
 	IParameterLabel,
 	NodeParameterValueType,
 } from 'n8n-workflow';
-import { CREDENTIAL_EMPTY_VALUE, NodeHelpers } from 'n8n-workflow';
+import {
+	CREDENTIAL_EMPTY_VALUE,
+	isResourceLocatorValue,
+	NodeHelpers,
+	resolveRelativePath,
+} from 'n8n-workflow';
 
+import type { CodeNodeLanguageOption } from '@/components/CodeNodeEditor/CodeNodeEditor.vue';
 import CodeNodeEditor from '@/components/CodeNodeEditor/CodeNodeEditor.vue';
 import CredentialsSelect from '@/components/CredentialsSelect.vue';
 import ExpressionEditModal from '@/components/ExpressionEditModal.vue';
@@ -37,40 +41,53 @@ import ResourceLocator from '@/components/ResourceLocator/ResourceLocator.vue';
 import SqlEditor from '@/components/SqlEditor/SqlEditor.vue';
 import TextEdit from '@/components/TextEdit.vue';
 
+import {
+	formatAsExpression,
+	getParameterTypeOption,
+	isResourceLocatorParameterType,
+	isValidParameterOption,
+	parseFromExpression,
+	shouldSkipParamValidation,
+} from '@/utils/nodeSettingsUtils';
 import { hasExpressionMapping, isValueExpression } from '@/utils/nodeTypesUtils';
-import { isResourceLocatorValue } from '@/utils/typeGuards';
 
 import {
 	AI_TRANSFORM_NODE_TYPE,
 	APP_MODALS_ELEMENT_ID,
 	CORE_NODES_CATEGORY,
 	CUSTOM_API_CALL_KEY,
+	ExpressionLocalResolveContextSymbol,
 	HTML_NODE_TYPE,
 	NODES_USING_CODE_NODE_EDITOR,
 } from '@/constants';
 
 import { useDebounce } from '@/composables/useDebounce';
 import { useExternalHooks } from '@/composables/useExternalHooks';
-import { useI18n } from '@/composables/useI18n';
+import { useI18n } from '@n8n/i18n';
 import { useNodeHelpers } from '@/composables/useNodeHelpers';
 import { useTelemetry } from '@/composables/useTelemetry';
 import { useWorkflowHelpers } from '@/composables/useWorkflowHelpers';
+import { useNodeSettingsParameters } from '@/composables/useNodeSettingsParameters';
 import { htmlEditorEventBus } from '@/event-bus';
 import { useCredentialsStore } from '@/stores/credentials.store';
 import { useNDVStore } from '@/stores/ndv.store';
 import { useNodeTypesStore } from '@/stores/nodeTypes.store';
 import { useSettingsStore } from '@/stores/settings.store';
 import { useWorkflowsStore } from '@/stores/workflows.store';
-import { isCredentialOnlyNodeType } from '@/utils/credentialOnlyNodes';
+import { useUIStore } from '@/stores/ui.store';
 import { N8nIcon, N8nInput, N8nInputNumber, N8nOption, N8nSelect } from '@n8n/design-system';
 import type { EventBus } from '@n8n/utils/event-bus';
 import { createEventBus } from '@n8n/utils/event-bus';
-import { useRouter } from 'vue-router';
-import { useElementSize } from '@vueuse/core';
+import { onClickOutside, useElementSize } from '@vueuse/core';
 import { captureMessage } from '@sentry/vue';
+import { isCredentialOnlyNodeType } from '@/utils/credentialOnlyNodes';
+import { hasFocusOnInput, isBlurrableEl, isFocusableEl, isSelectableEl } from '@/utils/typesUtils';
 import { completeExpressionSyntax, shouldConvertToExpression } from '@/utils/expressions';
-import { isPresent } from '@/utils/typesUtils';
 import CssEditor from './CssEditor/CssEditor.vue';
+import { useFocusPanelStore } from '@/stores/focusPanel.store';
+import ExperimentalEmbeddedNdvMapper from '@/components/canvas/experimental/components/ExperimentalEmbeddedNdvMapper.vue';
+import { useExperimentalNdvStore } from '@/components/canvas/experimental/experimentalNdv.store';
+import { useProjectsStore } from '@/stores/projects.store';
 
 type Picker = { $emit: (arg0: string, arg1: Date) => void };
 
@@ -124,8 +141,8 @@ const externalHooks = useExternalHooks();
 const i18n = useI18n();
 const nodeHelpers = useNodeHelpers();
 const { debounce } = useDebounce();
-const router = useRouter();
-const workflowHelpers = useWorkflowHelpers({ router });
+const workflowHelpers = useWorkflowHelpers();
+const nodeSettingsParameters = useNodeSettingsParameters();
 const telemetry = useTelemetry();
 
 const credentialsStore = useCredentialsStore();
@@ -133,11 +150,18 @@ const ndvStore = useNDVStore();
 const workflowsStore = useWorkflowsStore();
 const settingsStore = useSettingsStore();
 const nodeTypesStore = useNodeTypesStore();
+const uiStore = useUIStore();
+const focusPanelStore = useFocusPanelStore();
+const experimentalNdvStore = useExperimentalNdvStore();
+const projectsStore = useProjectsStore();
+
+const expressionLocalResolveCtx = inject(ExpressionLocalResolveContextSymbol, undefined);
 
 // ESLint: false positive
-// eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents, @typescript-eslint/no-duplicate-type-constituents
+// eslint-disable-next-line @typescript-eslint/no-redundant-type-constituents
 const inputField = ref<InstanceType<typeof N8nInput | typeof N8nSelect> | HTMLElement>();
 const wrapper = ref<HTMLDivElement>();
+const mapperRef = ref<InstanceType<typeof ExperimentalEmbeddedNdvMapper>>();
 
 const nodeName = ref('');
 const codeEditDialogVisible = ref(false);
@@ -179,6 +203,88 @@ const dateTimePickerOptions = ref({
 	],
 });
 const isFocused = ref(false);
+const isMapperShown = ref(false);
+
+const contextNode = expressionLocalResolveCtx?.value?.workflow.getNode(
+	expressionLocalResolveCtx.value.nodeName,
+);
+const node = computed(() => contextNode ?? ndvStore.activeNode ?? undefined);
+const nodeType = computed(
+	() => node.value && nodeTypesStore.getNodeType(node.value.type, node.value.typeVersion),
+);
+
+const shortPath = computed<string>(() => {
+	const short = props.path.split('.');
+	short.shift();
+	return short.join('.');
+});
+
+function getTypeOption<T>(optionName: string): T {
+	return getParameterTypeOption<T>(props.parameter, optionName);
+}
+
+const isModelValueExpression = computed(() => isValueExpression(props.parameter, props.modelValue));
+
+const isResourceLocatorParameter = computed<boolean>(() => {
+	return isResourceLocatorParameterType(props.parameter.type);
+});
+
+const isSecretParameter = computed<boolean>(() => {
+	return getTypeOption('password') === true;
+});
+
+const hasRemoteMethod = computed<boolean>(() => {
+	return !!getTypeOption('loadOptionsMethod') || !!getTypeOption('loadOptions');
+});
+
+const parameterOptions = computed(() => {
+	const options = hasRemoteMethod.value ? remoteParameterOptions.value : props.parameter.options;
+	const safeOptions = (options ?? []).filter(isValidParameterOption);
+
+	// temporary filter until native Python runner is GA
+	if (props.parameter.name === 'language' && !settingsStore.isNativePythonRunnerEnabled) {
+		return safeOptions.filter((o) => o.value !== 'pythonNative');
+	}
+
+	return safeOptions;
+});
+
+const modelValueString = computed<string>(() => {
+	return props.modelValue as string;
+});
+
+const modelValueResourceLocator = computed<INodeParameterResourceLocator>(() => {
+	return props.modelValue as INodeParameterResourceLocator;
+});
+
+const modelValueExpressionEdit = computed<NodeParameterValueType>(() => {
+	return isResourceLocatorParameter.value && typeof props.modelValue !== 'string'
+		? props.modelValue
+			? (props.modelValue as INodeParameterResourceLocator).value
+			: ''
+		: props.modelValue;
+});
+
+const editorRows = computed(() => getTypeOption<number>('rows'));
+
+const editorType = computed<EditorType | 'json' | 'code' | 'cssEditor'>(() => {
+	return getTypeOption<EditorType>('editor');
+});
+const editorIsReadOnly = computed<boolean>(() => {
+	return getTypeOption<boolean>('editorIsReadOnly') ?? false;
+});
+
+const editorLanguage = computed<CodeNodeLanguageOption>(() => {
+	if (editorType.value === 'json' || props.parameter.type === 'json') return 'json';
+
+	if (node.value?.parameters?.language === 'pythonNative') return 'pythonNative';
+
+	return getTypeOption<CodeNodeLanguageOption>('editorLanguage') ?? 'javaScript';
+});
+
+const codeEditorMode = computed<CodeExecutionMode>(() => {
+	return node.value?.parameters.mode as CodeExecutionMode;
+});
 
 const displayValue = computed(() => {
 	if (remoteParameterOptionsLoadingIssues.value) {
@@ -233,7 +339,7 @@ const displayValue = computed(() => {
 	if (
 		Array.isArray(returnValue) &&
 		props.parameter.type === 'color' &&
-		getArgument('showAlpha') === true &&
+		getTypeOption('showAlpha') === true &&
 		(returnValue as unknown as string).charAt(0) === '#'
 	) {
 		// Convert the value to rgba that el-color-picker can display it correctly
@@ -272,10 +378,8 @@ const expressionDisplayValue = computed(() => {
 	return `${displayValue.value ?? ''}`;
 });
 
-const isModelValueExpression = computed(() => isValueExpression(props.parameter, props.modelValue));
-
 const dependentParametersValues = computed<string | null>(() => {
-	const loadOptionsDependsOn = getArgument<string[] | undefined>('loadOptionsDependsOn');
+	const loadOptionsDependsOn = getTypeOption<string[] | undefined>('loadOptionsDependsOn');
 
 	if (loadOptionsDependsOn === undefined) {
 		return null;
@@ -287,37 +391,20 @@ const dependentParametersValues = computed<string | null>(() => {
 		const resolvedNodeParameters = workflowHelpers.resolveParameter(currentNodeParameters);
 
 		const returnValues: string[] = [];
-		for (const parameterPath of loadOptionsDependsOn) {
+		for (let parameterPath of loadOptionsDependsOn) {
+			parameterPath = resolveRelativePath(props.path, parameterPath);
+
 			returnValues.push(get(resolvedNodeParameters, parameterPath) as string);
 		}
 
 		return returnValues.join('|');
-	} catch (error) {
+	} catch {
 		return null;
 	}
 });
 
-const node = computed(() => ndvStore.activeNode ?? undefined);
-const nodeType = computed(
-	() => node.value && nodeTypesStore.getNodeType(node.value.type, node.value.typeVersion),
-);
-
-const displayTitle = computed<string>(() => {
-	const interpolation = { interpolate: { shortPath: shortPath.value } };
-
-	if (getIssues.value.length && isModelValueExpression.value) {
-		return i18n.baseText('parameterInput.parameterHasIssuesAndExpression', interpolation);
-	} else if (getIssues.value.length && !isModelValueExpression.value) {
-		return i18n.baseText('parameterInput.parameterHasIssues', interpolation);
-	} else if (!getIssues.value.length && isModelValueExpression.value) {
-		return i18n.baseText('parameterInput.parameterHasExpression', interpolation);
-	}
-
-	return i18n.baseText('parameterInput.parameter', interpolation);
-});
-
 const getStringInputType = computed(() => {
-	if (getArgument('password') === true) {
+	if (getTypeOption('password') === true) {
 		return 'password';
 	}
 
@@ -359,17 +446,19 @@ const getIssues = computed<string[]>(() => {
 		['options', 'multiOptions'].includes(props.parameter.type) &&
 		!remoteParameterOptionsLoading.value &&
 		remoteParameterOptionsLoadingIssues.value === null &&
-		parameterOptions.value
+		parameterOptions.value &&
+		(!isModelValueExpression.value || props.expressionEvaluated !== null)
 	) {
-		// Check if the value resolves to a valid option
-		// Currently it only displays an error in the node itself in
+		// Check if the value resolves to a valid option.
+		// For expressions do not validate if there is no evaluated value.
+		// Currently, it only displays an error in the node itself in
 		// case the value is not valid. The workflow can still be executed
 		// and the error is not displayed on the node in the workflow
 		const validOptions = parameterOptions.value.map((options) => options.value);
 
 		let checkValues: string[] = [];
 
-		if (!skipCheck(displayValue.value)) {
+		if (!shouldSkipParamValidation(props.parameter, displayValue.value)) {
 			if (Array.isArray(displayValue.value)) {
 				checkValues = checkValues.concat(displayValue.value);
 			} else {
@@ -379,9 +468,7 @@ const getIssues = computed<string[]>(() => {
 
 		for (const checkValue of checkValues) {
 			if (checkValue === null || !validOptions.includes(checkValue)) {
-				if (issues.parameters === undefined) {
-					issues.parameters = {};
-				}
+				issues.parameters = issues.parameters ?? {};
 
 				const issue = i18n.baseText('parameterInput.theValueIsNotSupported', {
 					interpolate: { checkValue },
@@ -391,9 +478,7 @@ const getIssues = computed<string[]>(() => {
 			}
 		}
 	} else if (remoteParameterOptionsLoadingIssues.value !== null && !isModelValueExpression.value) {
-		if (issues.parameters === undefined) {
-			issues.parameters = {};
-		}
+		issues.parameters = issues.parameters ?? {};
 		issues.parameters[props.parameter.name] = [
 			`There was a problem loading the parameter options from server: "${remoteParameterOptionsLoadingIssues.value}"`,
 		];
@@ -405,9 +490,7 @@ const getIssues = computed<string[]>(() => {
 			);
 
 			if (isSelectedArchived) {
-				if (issues.parameters === undefined) {
-					issues.parameters = {};
-				}
+				issues.parameters = issues.parameters ?? {};
 				const issue = i18n.baseText('parameterInput.selectedWorkflowIsArchived');
 				issues.parameters[props.parameter.name] = [issue];
 			}
@@ -421,32 +504,26 @@ const getIssues = computed<string[]>(() => {
 	return [];
 });
 
+const displayTitle = computed<string>(() => {
+	const interpolation = { interpolate: { shortPath: shortPath.value } };
+
+	if (getIssues.value.length && isModelValueExpression.value) {
+		return i18n.baseText('parameterInput.parameterHasIssuesAndExpression', interpolation);
+	} else if (getIssues.value.length && !isModelValueExpression.value) {
+		return i18n.baseText('parameterInput.parameterHasIssues', interpolation);
+	} else if (!getIssues.value.length && isModelValueExpression.value) {
+		return i18n.baseText('parameterInput.parameterHasExpression', interpolation);
+	}
+
+	return i18n.baseText('parameterInput.parameter', interpolation);
+});
+
 const displayIssues = computed(
 	() =>
 		props.parameter.type !== 'credentialsSelect' &&
 		!isResourceLocatorParameter.value &&
 		getIssues.value.length > 0,
 );
-
-const editorType = computed<EditorType | 'json' | 'code' | 'cssEditor'>(() => {
-	return getArgument<EditorType>('editor');
-});
-const editorIsReadOnly = computed<boolean>(() => {
-	return getArgument<boolean>('editorIsReadOnly') ?? false;
-});
-
-const editorLanguage = computed<CodeNodeEditorLanguage>(() => {
-	if (editorType.value === 'json' || props.parameter.type === 'json')
-		return 'json' as CodeNodeEditorLanguage;
-	return getArgument<CodeNodeEditorLanguage>('editorLanguage') ?? 'javaScript';
-});
-
-const parameterOptions = computed(() => {
-	const options = hasRemoteMethod.value ? remoteParameterOptions.value : props.parameter.options;
-	const safeOptions = (options ?? []).filter(isValidParameterOption);
-
-	return safeOptions;
-});
 
 const isSwitch = computed(
 	() => props.parameter.type === 'boolean' && !isModelValueExpression.value,
@@ -499,26 +576,8 @@ const parameterInputWrapperStyle = computed(() => {
 	return styles;
 });
 
-const hasRemoteMethod = computed<boolean>(() => {
-	return !!getArgument('loadOptionsMethod') || !!getArgument('loadOptions');
-});
-
-const shortPath = computed<string>(() => {
-	const short = props.path.split('.');
-	short.shift();
-	return short.join('.');
-});
-
 const parameterId = computed(() => {
 	return `${node.value?.id ?? crypto.randomUUID()}${props.path}`;
-});
-
-const isResourceLocatorParameter = computed<boolean>(() => {
-	return props.parameter.type === 'resourceLocator' || props.parameter.type === 'workflowSelector';
-});
-
-const isSecretParameter = computed<boolean>(() => {
-	return getArgument('password') === true;
 });
 
 const remoteParameterOptionsKeys = computed<string[]>(() => {
@@ -527,28 +586,6 @@ const remoteParameterOptionsKeys = computed<string[]>(() => {
 
 const shouldRedactValue = computed<boolean>(() => {
 	return getStringInputType.value === 'password' || props.isForCredential;
-});
-
-const modelValueString = computed<string>(() => {
-	return props.modelValue as string;
-});
-
-const modelValueResourceLocator = computed<INodeParameterResourceLocator>(() => {
-	return props.modelValue as INodeParameterResourceLocator;
-});
-
-const modelValueExpressionEdit = computed<string>(() => {
-	return isResourceLocatorParameter.value && typeof props.modelValue !== 'string'
-		? props.modelValue
-			? ((props.modelValue as INodeParameterResourceLocator).value as string)
-			: ''
-		: (props.modelValue as string);
-});
-
-const editorRows = computed(() => getArgument<number>('rows'));
-
-const codeEditorMode = computed<CodeExecutionMode>(() => {
-	return node.value?.parameters.mode as CodeExecutionMode;
 });
 
 const isCodeNode = computed(
@@ -563,7 +600,7 @@ const isInputTypeNumber = computed(() => props.parameter.type === 'number');
 const isInputDataEmpty = computed(() => ndvStore.isInputPanelEmpty);
 const isDropDisabled = computed(
 	() =>
-		props.parameter.noDataExpression ||
+		props.parameter.noDataExpression === true ||
 		props.isReadOnly ||
 		isResourceLocatorParameter.value ||
 		isModelValueExpression.value,
@@ -580,18 +617,9 @@ const showDragnDropTip = computed(
 		!props.isForCredential,
 );
 
-const shouldCaptureForPosthog = computed(() => {
-	if (node.value?.type) {
-		return [AI_TRANSFORM_NODE_TYPE].includes(node.value?.type);
-	}
-	return false;
-});
+const shouldCaptureForPosthog = computed(() => node.value?.type === AI_TRANSFORM_NODE_TYPE);
 
-function isValidParameterOption(
-	option: INodePropertyOptions | INodeProperties | INodePropertyCollection,
-): option is INodePropertyOptions {
-	return 'value' in option && isPresent(option.value) && isPresent(option.name);
-}
+const mapperElRef = computed(() => mapperRef.value?.contentRef);
 
 function isRemoteParameterOption(option: INodePropertyOptions) {
 	return remoteParameterOptionsKeys.value.includes(option.name);
@@ -611,29 +639,26 @@ function credentialSelected(updateInformation: INodeUpdatePropertiesInformation)
 	void externalHooks.run('nodeSettings.credentialSelected', { updateInformation });
 }
 
-/**
- * Check whether a param value must be skipped when collecting node param issues for validation.
- */
-function skipCheck(value: string | number | boolean | null) {
-	return typeof value === 'string' && value.includes(CUSTOM_API_CALL_KEY);
-}
-
 function getPlaceholder(): string {
 	return props.isForCredential
-		? i18n.credText().placeholder(props.parameter)
-		: i18n.nodeText().placeholder(props.parameter, props.path);
+		? i18n.credText(uiStore.activeCredentialType).placeholder(props.parameter)
+		: i18n.nodeText(ndvStore.activeNode?.type).placeholder(props.parameter, props.path);
 }
 
 function getOptionsOptionDisplayName(option: INodePropertyOptions): string {
 	return props.isForCredential
-		? i18n.credText().optionsOptionDisplayName(props.parameter, option)
-		: i18n.nodeText().optionsOptionDisplayName(props.parameter, option, props.path);
+		? i18n.credText(uiStore.activeCredentialType).optionsOptionDisplayName(props.parameter, option)
+		: i18n
+				.nodeText(ndvStore.activeNode?.type)
+				.optionsOptionDisplayName(props.parameter, option, props.path);
 }
 
 function getOptionsOptionDescription(option: INodePropertyOptions): string {
 	return props.isForCredential
-		? i18n.credText().optionsOptionDescription(props.parameter, option)
-		: i18n.nodeText().optionsOptionDescription(props.parameter, option, props.path);
+		? i18n.credText(uiStore.activeCredentialType).optionsOptionDescription(props.parameter, option)
+		: i18n
+				.nodeText(ndvStore.activeNode?.type)
+				.optionsOptionDescription(props.parameter, option, props.path);
 }
 
 async function loadRemoteParameterOptions() {
@@ -657,8 +682,8 @@ async function loadRemoteParameterOptions() {
 			props.parameter,
 			currentNodeParameters,
 		) as INodeParameters;
-		const loadOptionsMethod = getArgument<string | undefined>('loadOptionsMethod');
-		const loadOptions = getArgument<ILoadOptions | undefined>('loadOptions');
+		const loadOptionsMethod = getTypeOption<string | undefined>('loadOptionsMethod');
+		const loadOptions = getTypeOption<ILoadOptions | undefined>('loadOptions');
 
 		const options = await nodeTypesStore.getNodeParameterOptions({
 			nodeTypeAndVersion: {
@@ -670,11 +695,16 @@ async function loadRemoteParameterOptions() {
 			loadOptions,
 			currentNodeParameters: resolvedNodeParameters,
 			credentials: node.value.credentials,
+			projectId: projectsStore.currentProjectId,
 		});
 
 		remoteParameterOptions.value = remoteParameterOptions.value.concat(options);
-	} catch (error) {
-		remoteParameterOptionsLoadingIssues.value = error.message;
+	} catch (error: unknown) {
+		if (error instanceof Error) {
+			remoteParameterOptionsLoadingIssues.value = error.message;
+		} else {
+			remoteParameterOptionsLoadingIssues.value = String(error);
+		}
 	}
 
 	remoteParameterOptionsLoading.value = false;
@@ -712,12 +742,14 @@ function trackExpressionEditOpen() {
 	}
 }
 
-async function closeTextEditDialog() {
+function closeTextEditDialog() {
 	textEditDialogVisible.value = false;
 
 	editDialogClosing.value = true;
 	void nextTick().then(() => {
-		inputField.value?.blur?.();
+		if (isBlurrableEl(inputField.value)) {
+			inputField.value.blur();
+		}
 		editDialogClosing.value = false;
 	});
 }
@@ -734,17 +766,6 @@ function displayEditDialog() {
 	}
 }
 
-function getArgument<T = string | number | boolean | undefined>(argumentName: string): T {
-	return props.parameter.typeOptions?.[argumentName];
-}
-
-function expressionUpdated(value: string) {
-	const val: NodeParameterValueType = isResourceLocatorParameter.value
-		? { __rl: true, value, mode: modelValueResourceLocator.value.mode }
-		: value;
-	valueChanged(val);
-}
-
 function openExpressionEditorModal() {
 	if (!isModelValueExpression.value) return;
 
@@ -752,50 +773,16 @@ function openExpressionEditorModal() {
 	trackExpressionEditOpen();
 }
 
-function onBlur() {
-	emit('blur');
-	isFocused.value = false;
-}
-
-function onPaste(event: ClipboardEvent) {
-	const pastedText = event.clipboardData?.getData('text');
-	const input = event.target;
-
-	if (!(input instanceof HTMLInputElement)) return;
-
-	const start = input.selectionStart ?? 0;
-
-	// When a value starting with `=` is pasted that does not contain expression syntax ({{}})
-	// Add an extra `=` to go into expression mode and preserve the original pasted text
-	if (pastedText && pastedText.startsWith('=') && !pastedText.match(/{{.*?}}/g) && start === 0) {
-		event.preventDefault();
-
-		const end = input.selectionEnd ?? start;
-		const text = input.value;
-		const withExpressionPrefix = '=' + pastedText;
-
-		input.value = text.substring(0, start) + withExpressionPrefix + text.substring(end);
-		input.selectionStart = input.selectionEnd = start + withExpressionPrefix.length;
-
-		valueChanged(input.value);
-	}
-}
-
-function onResourceLocatorDrop(data: string) {
-	emit('drop', data);
-}
-
 function selectInput() {
-	const inputRef = inputField.value;
-	if (inputRef) {
-		if ('select' in inputRef) {
-			inputRef.select();
+	if (inputField.value) {
+		if (isSelectableEl(inputField.value)) {
+			inputField.value.select();
 		}
 	}
 }
 
 async function setFocus() {
-	if (['json'].includes(props.parameter.type) && getArgument('alwaysOpenEditWindow')) {
+	if (['json'].includes(props.parameter.type) && getTypeOption('alwaysOpenEditWindow')) {
 		displayEditDialog();
 		return;
 	}
@@ -812,15 +799,18 @@ async function setFocus() {
 
 	await nextTick();
 
-	const inputRef = inputField.value;
-	if (inputRef) {
-		if ('focusOnInput' in inputRef) {
-			inputRef.focusOnInput();
-		} else if (inputRef.focus) {
-			inputRef.focus();
+	if (inputField.value) {
+		if (hasFocusOnInput(inputField.value)) {
+			inputField.value.focusOnInput();
+		} else if (isFocusableEl(inputField.value)) {
+			inputField.value.focus();
 		}
 
 		isFocused.value = true;
+
+		if (isModelValueExpression.value || props.forceShowExpression || props.modelValue === '') {
+			isMapperShown.value = true;
+		}
 	}
 
 	emit('focus');
@@ -850,23 +840,48 @@ function onTextInputChange(value: string) {
 	emit('textInput', parameterData);
 }
 
-const valueChangedDebounced = debounce(valueChanged, { debounceTime: 100 });
-
-function onUpdateTextInput(value: string) {
-	valueChanged(value);
-	onTextInputChange(value);
+function trackWorkflowInputModeEvent(value: string) {
+	const telemetryValuesMap: Record<string, string> = {
+		workflowInputs: 'fields',
+		jsonExample: 'json',
+		passthrough: 'all',
+	};
+	telemetry.track('User chose input data mode', {
+		option: telemetryValuesMap[value],
+		workflow_id: workflowsStore.workflowId,
+		node_id: node.value?.id,
+	});
 }
 
-function valueChanged(value: NodeParameterValueType | {} | Date) {
+function valueChanged(untypedValue: unknown) {
 	if (remoteParameterOptionsLoading.value) {
 		return;
 	}
 
-	const oldValue = get(node.value, props.path);
-
-	if (oldValue !== undefined && oldValue === value) {
-		// Only update the value if it has changed
+	const oldValue = get(node.value, props.path) as unknown;
+	if (oldValue !== undefined && oldValue === untypedValue) {
+		// Skip emit if value hasn't changed
 		return;
+	}
+
+	let value: NodeParameterValueType;
+
+	if (untypedValue instanceof Date) {
+		value = untypedValue.toISOString();
+	} else if (
+		typeof untypedValue === 'string' ||
+		typeof untypedValue === 'number' ||
+		typeof untypedValue === 'boolean' ||
+		untypedValue === null ||
+		Array.isArray(untypedValue)
+	) {
+		value = untypedValue;
+	} else if (typeof untypedValue === 'object' && untypedValue !== null && '__rl' in untypedValue) {
+		// likely INodeParameterResourceLocator
+		value = untypedValue as NodeParameterValueType;
+	} else {
+		// fallback
+		value = untypedValue as NodeParameterValueType;
 	}
 
 	const isSpecializedEditor = props.parameter.typeOptions?.editor !== undefined;
@@ -886,13 +901,9 @@ function valueChanged(value: NodeParameterValueType | {} | Date) {
 
 	value = completeExpressionSyntax(value, isSpecializedEditor);
 
-	if (value instanceof Date) {
-		value = value.toISOString();
-	}
-
 	if (
 		props.parameter.type === 'color' &&
-		getArgument('showAlpha') === true &&
+		getTypeOption('showAlpha') === true &&
 		value !== null &&
 		value !== undefined &&
 		(value as string).toString().charAt(0) !== '#'
@@ -904,7 +915,7 @@ function valueChanged(value: NodeParameterValueType | {} | Date) {
 		}
 	}
 
-	const parameterData = {
+	const parameterData: IUpdateInformation = {
 		node: node.value ? node.value.name : nodeName.value,
 		name: props.path,
 		value,
@@ -916,10 +927,11 @@ function valueChanged(value: NodeParameterValueType | {} | Date) {
 		telemetry.track('User set node operation or mode', {
 			workflow_id: workflowsStore.workflowId,
 			node_type: node.value?.type,
-			resource: node.value && node.value.parameters.resource,
+			resource: node.value?.parameters.resource,
 			is_custom: value === CUSTOM_API_CALL_KEY,
 			push_ref: ndvStore.pushRef,
 			parameter: props.parameter.name,
+			value: value as string,
 		});
 	}
 	// Track workflow input data mode change
@@ -930,91 +942,133 @@ function valueChanged(value: NodeParameterValueType | {} | Date) {
 	}
 }
 
-function trackWorkflowInputModeEvent(value: string) {
-	const telemetryValuesMap: Record<string, string> = {
-		workflowInputs: 'fields',
-		jsonExample: 'json',
-		passthrough: 'all',
-	};
-	telemetry.track('User chose input data mode', {
-		option: telemetryValuesMap[value],
-		workflow_id: workflowsStore.workflowId,
-		node_id: node.value?.id,
-	});
+const valueChangedDebounced = debounce(valueChanged, { debounceTime: 100 });
+
+function expressionUpdated(value: string) {
+	const val: NodeParameterValueType = isResourceLocatorParameter.value
+		? { __rl: true, value, mode: modelValueResourceLocator.value.mode }
+		: value;
+	valueChanged(val);
+}
+
+function onBlur(event?: FocusEvent | KeyboardEvent) {
+	emit('blur');
+	isFocused.value = false;
+
+	if (
+		!(event?.target instanceof Node && mapperElRef.value?.contains(event.target)) &&
+		!(
+			event instanceof FocusEvent &&
+			event.relatedTarget instanceof Node &&
+			mapperElRef.value?.contains(event.relatedTarget)
+		)
+	) {
+		isMapperShown.value = false;
+	}
+}
+
+function onPaste(event: ClipboardEvent) {
+	const pastedText = event.clipboardData?.getData('text');
+	const input = event.target;
+
+	if (!(input instanceof HTMLInputElement)) return;
+
+	const start = input.selectionStart ?? 0;
+
+	// When a value starting with `=` is pasted that does not contain expression syntax ({{}})
+	// Add an extra `=` to go into expression mode and preserve the original pasted text
+	if (pastedText && pastedText.startsWith('=') && !pastedText.match(/{{.*?}}/g) && start === 0) {
+		event.preventDefault();
+
+		const end = input.selectionEnd ?? start;
+		const text = input.value;
+		const withExpressionPrefix = '=' + pastedText;
+
+		input.value = text.substring(0, start) + withExpressionPrefix + text.substring(end);
+		input.selectionStart = input.selectionEnd = start + withExpressionPrefix.length;
+
+		valueChanged(input.value);
+	}
+}
+
+function onPasteNumber(event: ClipboardEvent) {
+	const pastedText = event.clipboardData?.getData('text');
+
+	if (shouldConvertToExpression(pastedText)) {
+		event.preventDefault();
+		valueChanged('=' + pastedText);
+		return;
+	}
+}
+
+function onResourceLocatorDrop(data: string) {
+	emit('drop', data);
+}
+
+function onUpdateTextInput(value: string) {
+	valueChanged(value);
+	onTextInputChange(value);
+}
+
+function onClickOutsideMapper() {
+	if (!isFocused.value) {
+		isMapperShown.value = false;
+	}
 }
 
 async function optionSelected(command: string) {
 	const prevValue = props.modelValue;
 
-	if (command === 'resetValue') {
-		valueChanged(props.parameter.default);
-	} else if (command === 'addExpression') {
-		if (isResourceLocatorParameter.value) {
-			if (isResourceLocatorValue(props.modelValue)) {
-				valueChanged({
-					__rl: true,
-					value: `=${props.modelValue.value}`,
-					mode: props.modelValue.mode,
+	switch (command) {
+		case 'resetValue':
+			return valueChanged(props.parameter.default);
+
+		case 'addExpression':
+			valueChanged(formatAsExpression(props.modelValue, props.parameter.type));
+			await setFocus();
+			break;
+
+		case 'removeExpression':
+			isFocused.value = false;
+			isMapperShown.value = false;
+			valueChanged(
+				parseFromExpression(
+					props.modelValue,
+					props.expressionEvaluated,
+					props.parameter.type,
+					props.parameter.default,
+					parameterOptions.value,
+				),
+			);
+			break;
+
+		case 'refreshOptions':
+			if (isResourceLocatorParameter.value) {
+				props.eventBus.emit('refreshList');
+			}
+			void loadRemoteParameterOptions();
+			return;
+
+		case 'formatHtml':
+			htmlEditorEventBus.emit('format-html');
+			return;
+
+		case 'focus':
+			nodeSettingsParameters.handleFocus(node.value, props.path, props.parameter);
+
+			if (experimentalNdvStore.isNdvInFocusPanelEnabled) {
+				telemetry.track('User added focused param', {
+					source: 'parameterButton',
+					parameters: focusPanelStore.focusedNodeParametersInTelemetryFormat,
 				});
 			} else {
-				valueChanged({ __rl: true, value: `=${props.modelValue}`, mode: '' });
+				telemetry.track('User opened focus panel', {
+					source: 'parameterButton',
+					parameters: focusPanelStore.focusedNodeParametersInTelemetryFormat,
+				});
 			}
-		} else if (
-			props.parameter.type === 'number' &&
-			(!props.modelValue || props.modelValue === '[Object: null]')
-		) {
-			valueChanged('={{ 0 }}');
-		} else if (props.parameter.type === 'multiOptions') {
-			valueChanged(`={{ ${JSON.stringify(props.modelValue)} }}`);
-		} else if (
-			props.parameter.type === 'number' ||
-			props.parameter.type === 'boolean' ||
-			typeof props.modelValue !== 'string'
-		) {
-			valueChanged(`={{ ${props.modelValue} }}`);
-		} else {
-			valueChanged(`=${props.modelValue}`);
-		}
 
-		await setFocus();
-	} else if (command === 'removeExpression') {
-		let value = props.expressionEvaluated;
-
-		isFocused.value = false;
-
-		if (props.parameter.type === 'multiOptions' && typeof value === 'string') {
-			value = (value || '')
-				.split(',')
-				.filter((valueItem) =>
-					(parameterOptions.value ?? []).find((option) => option.value === valueItem),
-				);
-		}
-
-		if (isResourceLocatorParameter.value && isResourceLocatorValue(props.modelValue)) {
-			valueChanged({ __rl: true, value, mode: props.modelValue.mode });
-		} else {
-			let newValue: NodeParameterValueType | {} = typeof value !== 'undefined' ? value : null;
-
-			if (props.parameter.type === 'string') {
-				// Strip the '=' from the beginning
-				newValue = modelValueString.value
-					? modelValueString.value.toString().replace(/^=+/, '')
-					: null;
-			} else if (newValue === null) {
-				// Invalid expressions land here
-				if (['number', 'boolean'].includes(props.parameter.type)) {
-					newValue = props.parameter.default;
-				}
-			}
-			valueChanged(newValue);
-		}
-	} else if (command === 'refreshOptions') {
-		if (isResourceLocatorParameter.value) {
-			props.eventBus.emit('refreshList');
-		}
-		void loadRemoteParameterOptions();
-	} else if (command === 'formatHtml') {
-		htmlEditorEventBus.emit('format-html');
+			return;
 	}
 
 	if (node.value && (command === 'addExpression' || command === 'removeExpression')) {
@@ -1047,7 +1101,7 @@ onMounted(() => {
 
 	if (
 		props.parameter.type === 'color' &&
-		getArgument('showAlpha') === true &&
+		getTypeOption('showAlpha') === true &&
 		displayValue.value !== null &&
 		displayValue.value.toString().charAt(0) !== '#'
 	) {
@@ -1059,6 +1113,7 @@ onMounted(() => {
 
 	void externalHooks.run('parameterInput.mount', {
 		parameter: props.parameter,
+		// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unnecessary-type-assertion
 		inputFieldRef: inputField.value as InstanceType<typeof N8nInput>,
 	});
 });
@@ -1117,8 +1172,8 @@ watch(dependentParametersValues, async () => {
 
 watch(
 	() => props.modelValue,
-	async () => {
-		if (props.parameter.type === 'color' && getArgument('showAlpha') === true) {
+	() => {
+		if (props.parameter.type === 'color' && getTypeOption('showAlpha') === true) {
 			// Do not set for color with alpha else wrong value gets displayed in field
 			return;
 		}
@@ -1132,7 +1187,7 @@ watch(remoteParameterOptionsLoading, () => {
 
 // Focus input field when changing between fixed and expression
 watch(isModelValueExpression, async (isExpression, wasExpression) => {
-	if (!props.isReadOnly && isExpression !== wasExpression) {
+	if (!props.isReadOnly && isFocused.value && isExpression !== wasExpression) {
 		await nextTick();
 		await setFocus();
 	}
@@ -1173,6 +1228,8 @@ onUpdated(async () => {
 		}
 	}
 });
+
+onClickOutside(mapperElRef, onClickOutsideMapper);
 </script>
 
 <template>
@@ -1182,6 +1239,7 @@ onUpdated(async () => {
 		@keydown.stop
 	>
 		<ExpressionEditModal
+			v-if="typeof modelValueExpressionEdit === 'string'"
 			:dialog-visible="expressionEditDialogVisible"
 			:model-value="modelValueExpressionEdit"
 			:parameter="parameter"
@@ -1192,7 +1250,17 @@ onUpdated(async () => {
 			:redact-values="shouldRedactValue"
 			@close-dialog="closeExpressionEditDialog"
 			@update:model-value="expressionUpdated"
-		></ExpressionEditModal>
+		/>
+
+		<ExperimentalEmbeddedNdvMapper
+			v-if="node && expressionLocalResolveCtx?.inputNode"
+			ref="mapperRef"
+			:workflow="expressionLocalResolveCtx?.workflow"
+			:node="node"
+			:input-node-name="expressionLocalResolveCtx?.inputNode?.name"
+			:visible="isMapperShown"
+			:virtual-ref="wrapper"
+		/>
 
 		<div
 			:class="[
@@ -1203,6 +1271,7 @@ onUpdated(async () => {
 				},
 			]"
 			:style="parameterInputWrapperStyle"
+			:data-parameter-path="path"
 		>
 			<ResourceLocator
 				v-if="parameter.type === 'resourceLocator'"
@@ -1275,7 +1344,7 @@ onUpdated(async () => {
 					:model-value="codeEditDialogVisible"
 					:append-to="`#${APP_MODALS_ELEMENT_ID}`"
 					:title="`${i18n.baseText('codeEdit.edit')} ${i18n
-						.nodeText()
+						.nodeText(ndvStore.activeNode?.type)
 						.inputLabelDisplayName(parameter, path)}`"
 					:before-close="closeCodeEditDialog"
 					data-test-id="code-editor-fullscreen"
@@ -1313,7 +1382,7 @@ onUpdated(async () => {
 						<SqlEditor
 							v-else-if="editorType === 'sqlEditor' && codeEditDialogVisible"
 							:model-value="modelValueString"
-							:dialect="getArgument('sqlDialect')"
+							:dialect="getTypeOption('sqlDialect')"
 							:is-read-only="isReadOnly"
 							:rows="editorRows"
 							fullscreen
@@ -1364,15 +1433,18 @@ onUpdated(async () => {
 					@update:model-value="valueChangedDebounced"
 				>
 					<template #suffix>
-						<N8nIcon
+						<span
 							v-if="!editorIsReadOnly"
-							data-test-id="code-editor-fullscreen-button"
-							icon="external-link-alt"
-							size="xsmall"
 							class="textarea-modal-opener"
-							:title="i18n.baseText('parameterInput.openEditWindow')"
+							data-test-id="code-editor-fullscreen-button"
 							@click="displayEditDialog()"
-						/>
+						>
+							<N8nIcon
+								icon="external-link"
+								size="xsmall"
+								:title="i18n.baseText('parameterInput.openEditWindow')"
+							/>
+						</span>
 					</template>
 				</CodeNodeEditor>
 
@@ -1386,14 +1458,17 @@ onUpdated(async () => {
 					@update:model-value="valueChangedDebounced"
 				>
 					<template #suffix>
-						<N8nIcon
-							data-test-id="code-editor-fullscreen-button"
-							icon="external-link-alt"
-							size="xsmall"
+						<span
 							class="textarea-modal-opener"
-							:title="i18n.baseText('parameterInput.openEditWindow')"
+							data-test-id="code-editor-fullscreen-button"
 							@click="displayEditDialog()"
-						/>
+						>
+							<N8nIcon
+								icon="external-link"
+								size="xsmall"
+								:title="i18n.baseText('parameterInput.openEditWindow')"
+							/>
+						</span>
 					</template>
 				</HtmlEditor>
 
@@ -1405,34 +1480,40 @@ onUpdated(async () => {
 					@update:model-value="valueChangedDebounced"
 				>
 					<template #suffix>
-						<N8nIcon
-							data-test-id="code-editor-fullscreen-button"
-							icon="external-link-alt"
-							size="xsmall"
+						<span
 							class="textarea-modal-opener"
-							:title="i18n.baseText('parameterInput.openEditWindow')"
+							data-test-id="code-editor-fullscreen-button"
 							@click="displayEditDialog()"
-						/>
+						>
+							<N8nIcon
+								icon="external-link"
+								size="xsmall"
+								:title="i18n.baseText('parameterInput.openEditWindow')"
+							/>
+						</span>
 					</template>
 				</CssEditor>
 
 				<SqlEditor
 					v-else-if="editorType === 'sqlEditor'"
 					:model-value="modelValueString"
-					:dialect="getArgument('sqlDialect')"
+					:dialect="getTypeOption('sqlDialect')"
 					:is-read-only="isReadOnly"
 					:rows="editorRows"
 					@update:model-value="valueChangedDebounced"
 				>
 					<template #suffix>
-						<N8nIcon
-							data-test-id="code-editor-fullscreen-button"
-							icon="external-link-alt"
-							size="xsmall"
+						<span
 							class="textarea-modal-opener"
-							:title="i18n.baseText('parameterInput.openEditWindow')"
+							data-test-id="code-editor-fullscreen-button"
 							@click="displayEditDialog()"
-						/>
+						>
+							<N8nIcon
+								icon="external-link"
+								size="xsmall"
+								:title="i18n.baseText('parameterInput.openEditWindow')"
+							/>
+						</span>
 					</template>
 				</SqlEditor>
 
@@ -1445,15 +1526,18 @@ onUpdated(async () => {
 					@update:model-value="valueChangedDebounced"
 				>
 					<template #suffix>
-						<N8nIcon
+						<span
 							v-if="!editorIsReadOnly"
-							data-test-id="code-editor-fullscreen-button"
-							icon="external-link-alt"
-							size="xsmall"
 							class="textarea-modal-opener"
-							:title="i18n.baseText('parameterInput.openEditWindow')"
+							data-test-id="code-editor-fullscreen-button"
 							@click="displayEditDialog()"
-						/>
+						>
+							<N8nIcon
+								icon="external-link"
+								size="xsmall"
+								:title="i18n.baseText('parameterInput.openEditWindow')"
+							/>
+						</span>
 					</template>
 				</JsEditor>
 
@@ -1465,14 +1549,17 @@ onUpdated(async () => {
 					@update:model-value="valueChangedDebounced"
 				>
 					<template #suffix>
-						<N8nIcon
-							data-test-id="code-editor-fullscreen-button"
-							icon="external-link-alt"
-							size="xsmall"
+						<span
 							class="textarea-modal-opener"
-							:title="i18n.baseText('parameterInput.openEditWindow')"
+							data-test-id="code-editor-fullscreen-button"
 							@click="displayEditDialog()"
-						/>
+						>
+							<N8nIcon
+								icon="external-link"
+								size="xsmall"
+								:title="i18n.baseText('parameterInput.openEditWindow')"
+							/>
+						</span>
 					</template>
 				</JsonEditor>
 
@@ -1511,19 +1598,23 @@ onUpdated(async () => {
 					@paste="onPaste"
 				>
 					<template #suffix>
-						<N8nIcon
+						<span
 							v-if="!isReadOnly && !isSecretParameter"
-							icon="external-link-alt"
-							size="xsmall"
-							class="edit-window-button textarea-modal-opener"
 							:class="{
+								'textarea-modal-opener': true,
+								'edit-window-button': true,
 								focused: isFocused,
 								invalid: !isFocused && getIssues.length > 0 && !isModelValueExpression,
 							}"
-							:title="i18n.baseText('parameterInput.openEditWindow')"
 							@click="displayEditDialog()"
 							@focus="setFocus"
-						/>
+						>
+							<N8nIcon
+								icon="external-link"
+								size="xsmall"
+								:title="i18n.baseText('parameterInput.openEditWindow')"
+							/>
+						</span>
 					</template>
 				</N8nInput>
 			</div>
@@ -1535,7 +1626,7 @@ onUpdated(async () => {
 					:model-value="displayValue"
 					:disabled="isReadOnly"
 					:title="displayTitle"
-					:show-alpha="getArgument('showAlpha')"
+					:show-alpha="getTypeOption('showAlpha')"
 					@focus="setFocus"
 					@blur="onBlur"
 					@update:model-value="valueChanged"
@@ -1581,9 +1672,9 @@ onUpdated(async () => {
 				:size="inputSize"
 				:model-value="displayValue"
 				:controls="false"
-				:max="getArgument('maxValue')"
-				:min="getArgument('minValue')"
-				:precision="getArgument('numberPrecision')"
+				:max="getTypeOption('maxValue')"
+				:min="getTypeOption('minValue')"
+				:precision="getTypeOption('numberPrecision')"
 				:disabled="isReadOnly"
 				:class="{ 'ph-no-capture': shouldRedactValue }"
 				:title="displayTitle"
@@ -1591,7 +1682,7 @@ onUpdated(async () => {
 				@update:model-value="onUpdateTextInput"
 				@focus="setFocus"
 				@blur="onBlur"
-				@keydown.stop
+				@paste="onPasteNumber"
 			/>
 
 			<CredentialsSelect

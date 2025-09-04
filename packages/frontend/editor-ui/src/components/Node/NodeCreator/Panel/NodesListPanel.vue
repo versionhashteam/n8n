@@ -7,6 +7,7 @@ import {
 	REGULAR_NODE_CREATOR_VIEW,
 	TRIGGER_NODE_CREATOR_VIEW,
 	AI_UNCATEGORIZED_CATEGORY,
+	AI_EVALUATION,
 } from '@/constants';
 
 import { useNodeCreatorStore } from '@/stores/nodeCreator.store';
@@ -17,7 +18,7 @@ import { useKeyboardNavigation } from '../composables/useKeyboardNavigation';
 import SearchBar from './SearchBar.vue';
 import ActionsRenderer from '../Modes/ActionsMode.vue';
 import NodesRenderer from '../Modes/NodesMode.vue';
-import { useI18n } from '@/composables/useI18n';
+import { useI18n } from '@n8n/i18n';
 import { useDebounce } from '@/composables/useDebounce';
 import NodeIcon from '@/components/NodeIcon.vue';
 
@@ -25,6 +26,7 @@ import CommunityNodeDetails from './CommunityNodeDetails.vue';
 import CommunityNodeInfo from './CommunityNodeInfo.vue';
 import CommunityNodeDocsLink from './CommunityNodeDocsLink.vue';
 import CommunityNodeFooter from './CommunityNodeFooter.vue';
+import { useUsersStore } from '@/stores/users.store';
 
 const i18n = useI18n();
 const { callDebounced } = useDebounce();
@@ -33,6 +35,8 @@ const { mergedNodes } = useNodeCreatorStore();
 const { pushViewStack, popViewStack, updateCurrentViewStack } = useViewStacks();
 const { setActiveItemIndex, attachKeydownEvent, detachKeydownEvent } = useKeyboardNavigation();
 const nodeCreatorStore = useNodeCreatorStore();
+
+const { isInstanceOwner } = useUsersStore();
 
 const activeViewStack = computed(() => useViewStacks().activeViewStack);
 
@@ -123,6 +127,7 @@ watch(
 			[AI_NODE_CREATOR_VIEW]: AIView,
 			[AI_OTHERS_NODE_CREATOR_VIEW]: AINodesView,
 			[AI_UNCATEGORIZED_CATEGORY]: AINodesView,
+			[AI_EVALUATION]: AINodesView,
 		};
 
 		const itemKey = selectedView;
@@ -179,7 +184,7 @@ function onBackButton() {
 						:class="$style.backButton"
 						@click="onBackButton"
 					>
-						<font-awesome-icon :class="$style.backButtonIcon" icon="arrow-left" size="2x" />
+						<n8n-icon :class="$style.backButtonIcon" icon="arrow-left" :size="22" />
 					</button>
 					<NodeIcon
 						v-if="activeViewStack.nodeIcon"
@@ -188,6 +193,7 @@ function onBackButton() {
 						:circle="false"
 						:show-tooltip="false"
 						:size="20"
+						:use-updated-icons="true"
 					/>
 					<p v-if="activeViewStack.title" :class="$style.title" v-text="activeViewStack.title" />
 
@@ -233,6 +239,7 @@ function onBackButton() {
 			<CommunityNodeFooter
 				v-if="communityNodeDetails && !isCommunityNodeActionsMode"
 				:package-name="communityNodeDetails.packageName"
+				:show-manage="communityNodeDetails.installed && isInstanceOwner"
 			/>
 		</aside>
 	</transition>
@@ -269,12 +276,11 @@ function onBackButton() {
 	background: transparent;
 	border: none;
 	cursor: pointer;
-	padding: 0 var(--spacing-xs) 0 0;
+	padding: var(--spacing-2xs) var(--spacing-xs) 0 0;
 }
 
 .backButtonIcon {
 	color: $node-creator-arrow-color;
-	height: 16px;
 	padding: 0;
 }
 .nodeIcon {

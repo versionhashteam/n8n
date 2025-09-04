@@ -1,4 +1,5 @@
-import { WorkflowEntity } from '@n8n/db';
+import { mockInstance } from '@n8n/backend-test-utils';
+import { SettingsRepository, WorkflowEntity } from '@n8n/db';
 import { Container } from '@n8n/di';
 import { mock } from 'jest-mock-extended';
 import {
@@ -21,12 +22,9 @@ import { v4 as uuid } from 'uuid';
 
 import config from '@/config';
 import { AUTH_COOKIE_NAME } from '@/constants';
-import { SettingsRepository } from '@/databases/repositories/settings.repository';
 import { ExecutionService } from '@/executions/execution.service';
 import { LoadNodesAndCredentials } from '@/load-nodes-and-credentials';
 import { Push } from '@/push';
-
-import { mockInstance } from '../../../shared/mocking';
 
 export { setupTestServer } from './test-server';
 
@@ -137,7 +135,7 @@ export function getAuthToken(response: request.Response, authCookieName = AUTH_C
 
 	const match = authCookie.match(new RegExp(`(^| )${authCookieName}=(?<token>[^;]+)`));
 
-	if (!match || !match.groups) return undefined;
+	if (!match?.groups) return undefined;
 
 	return match.groups.token;
 }

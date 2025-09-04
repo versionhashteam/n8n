@@ -19,10 +19,16 @@
                 "dealname": {
                     "type": "string"
                 },
+                "dealstage": {
+                    "type": "string"
+                },
                 "hs_lastmodifieddate": {
                     "type": "string"
                 },
                 "hs_object_id": {
+                    "type": "string"
+                },
+                "pipeline": {
                     "type": "string"
                 }
             }
@@ -31,5 +37,5 @@
             "type": "string"
         }
     },
-    "version": 3
+    "version": 5
 }

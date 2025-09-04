@@ -16,11 +16,17 @@
         "properties": {
             "type": "object",
             "properties": {
-                "subject": {
+                "content": {
                     "type": "object",
                     "properties": {
+                        "isEncrypted": {
+                            "type": "boolean"
+                        },
                         "persistenceTimestamp": {
                             "type": "integer"
+                        },
+                        "requestId": {
+                            "type": "string"
                         },
                         "sensitivityLevel": {
                             "type": "string"
@@ -51,7 +57,7 @@
                                     "source": {
                                         "type": "string"
                                     },
-                                    "sourceId": {
+                                    "sourceUpstreamDeployable": {
                                         "type": "string"
                                     },
                                     "sourceVid": {
@@ -74,5 +80,5 @@
             }
         }
     },
-    "version": 3
+    "version": 5
 }

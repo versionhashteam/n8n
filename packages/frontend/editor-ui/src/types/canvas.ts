@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-redundant-type-constituents */
 import type { ExecutionStatus, INodeConnections, NodeConnectionType } from 'n8n-workflow';
 import type {
 	DefaultEdge,
@@ -123,9 +122,10 @@ export interface CanvasNodeData {
 		status?: ExecutionStatus;
 		waiting?: string;
 		running: boolean;
+		waitingForNext?: boolean;
 	};
 	runData: {
-		outputMap: ExecutionOutputMap;
+		outputMap?: ExecutionOutputMap;
 		iterations: number;
 		visible: boolean;
 	};
@@ -163,6 +163,8 @@ export interface CanvasInjectionData {
 	isExecuting: Ref<boolean | undefined>;
 	connectingHandle: Ref<ConnectStartEvent | undefined>;
 	viewport: Ref<ViewportTransform>;
+	isExperimentalNdvActive: ComputedRef<boolean>;
+	isPaneMoving: Ref<boolean>;
 }
 
 export type CanvasNodeEventBusEvents = {
@@ -175,13 +177,13 @@ export type CanvasEventBusEvents = {
 	fitView: never;
 	'saved:workflow': never;
 	'open:execution': IExecutionResponse;
-	'nodes:select': { ids: string[] };
+	'nodes:select': { ids: string[]; panIntoView?: boolean };
 	'nodes:action': {
 		ids: string[];
 		action: keyof CanvasNodeEventBusEvents;
 		payload?: CanvasNodeEventBusEvents[keyof CanvasNodeEventBusEvents];
 	};
-	tidyUp: { source: CanvasLayoutSource };
+	tidyUp: { source: CanvasLayoutSource; nodeIdsFilter?: string[] };
 };
 
 export interface CanvasNodeInjectionData {
@@ -228,4 +230,11 @@ export type BoundingBox = {
 	y: number;
 	width: number;
 	height: number;
+};
+
+export type ViewportBoundaries = {
+	xMin: number;
+	xMax: number;
+	yMin: number;
+	yMax: number;
 };

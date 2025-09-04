@@ -1,7 +1,9 @@
+import { createWorkflow, testDb, mockInstance } from '@n8n/backend-test-utils';
 import type { WebhookEntity } from '@n8n/db';
+import { WorkflowRepository } from '@n8n/db';
 import { Container } from '@n8n/di';
 import { mock } from 'jest-mock-extended';
-import { InstanceSettings } from 'n8n-core';
+import { InstanceSettings, ExternalSecretsProxy } from 'n8n-core';
 import { FormTrigger } from 'n8n-nodes-base/nodes/Form/FormTrigger.node';
 import { ScheduleTrigger } from 'n8n-nodes-base/nodes/Schedule/ScheduleTrigger.node';
 import { NodeApiError, Workflow } from 'n8n-workflow';
@@ -14,26 +16,21 @@ import type {
 
 import { ActiveExecutions } from '@/active-executions';
 import { ActiveWorkflowManager } from '@/active-workflow-manager';
-import { WorkflowRepository } from '@/databases/repositories/workflow.repository';
 import { ExecutionService } from '@/executions/execution.service';
 import { ExternalHooks } from '@/external-hooks';
 import { NodeTypes } from '@/node-types';
 import { Push } from '@/push';
-import { SecretsHelper } from '@/secrets-helpers.ee';
 import * as WebhookHelpers from '@/webhooks/webhook-helpers';
 import { WebhookService } from '@/webhooks/webhook.service';
 import * as AdditionalData from '@/workflow-execute-additional-data';
 import { WorkflowService } from '@/workflows/workflow.service';
 
 import { createOwner } from './shared/db/users';
-import { createWorkflow } from './shared/db/workflows';
-import * as testDb from './shared/test-db';
 import * as utils from './shared/utils/';
-import { mockInstance } from '../shared/mocking';
 
 mockInstance(ActiveExecutions);
 mockInstance(Push);
-mockInstance(SecretsHelper);
+mockInstance(ExternalSecretsProxy);
 mockInstance(ExecutionService);
 mockInstance(WorkflowService);
 

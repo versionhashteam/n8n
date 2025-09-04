@@ -1,27 +1,27 @@
-import type { Project } from '@n8n/db';
-import type { User } from '@n8n/db';
-import { TagEntity } from '@n8n/db';
-import { CredentialsRepository } from '@n8n/db';
-import { TagRepository } from '@n8n/db';
-import { SharedWorkflowRepository } from '@n8n/db';
+import {
+	getPersonalProject,
+	createWorkflow,
+	getAllSharedWorkflows,
+	getWorkflowById,
+	newWorkflow,
+	testDb,
+} from '@n8n/backend-test-utils';
+import type { Project, User } from '@n8n/db';
+import {
+	TagEntity,
+	CredentialsRepository,
+	TagRepository,
+	SharedWorkflowRepository,
+	WorkflowRepository,
+} from '@n8n/db';
 import { Container } from '@n8n/di';
 import { mock } from 'jest-mock-extended';
 import type { INode } from 'n8n-workflow';
 import { v4 as uuid } from 'uuid';
 
-import { WorkflowRepository } from '@/databases/repositories/workflow.repository';
 import { ImportService } from '@/services/import.service';
 
-import { getPersonalProject } from './shared/db/projects';
 import { createMember, createOwner } from './shared/db/users';
-import {
-	createWorkflow,
-	getAllSharedWorkflows,
-	getWorkflowById,
-	newWorkflow,
-} from './shared/db/workflows';
-import * as testDb from './shared/test-db';
-import { mockInstance } from '../shared/mocking';
 
 describe('ImportService', () => {
 	let importService: ImportService;
@@ -37,9 +37,7 @@ describe('ImportService', () => {
 
 		tagRepository = Container.get(TagRepository);
 
-		const credentialsRepository = mockInstance(CredentialsRepository);
-
-		credentialsRepository.find.mockResolvedValue([]);
+		const credentialsRepository = Container.get(CredentialsRepository);
 
 		importService = new ImportService(mock(), credentialsRepository, tagRepository);
 	});

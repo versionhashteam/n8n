@@ -1,4 +1,5 @@
 import type { CreateCredentialDto } from '@n8n/api-types';
+import { Logger } from '@n8n/backend-common';
 import type { Project, User, ICredentialsDb, ScopesField } from '@n8n/db';
 import {
 	CredentialsEntity,
@@ -6,9 +7,10 @@ import {
 	CredentialsRepository,
 	ProjectRepository,
 	SharedCredentialsRepository,
+	UserRepository,
 } from '@n8n/db';
 import { Service } from '@n8n/di';
-import { hasGlobalScope, type Scope } from '@n8n/permissions';
+import { hasGlobalScope, PROJECT_OWNER_ROLE_SLUG, type Scope } from '@n8n/permissions';
 // eslint-disable-next-line n8n-local-rules/misplaced-n8n-typeorm-import
 import {
 	In,
@@ -16,7 +18,7 @@ import {
 	type FindOptionsRelations,
 	type FindOptionsWhere,
 } from '@n8n/typeorm';
-import { CredentialDataError, Credentials, ErrorReporter, Logger } from 'n8n-core';
+import { CredentialDataError, Credentials, ErrorReporter } from 'n8n-core';
 import type {
 	ICredentialDataDecryptedObject,
 	ICredentialsDecrypted,
@@ -25,11 +27,11 @@ import type {
 } from 'n8n-workflow';
 import { CREDENTIAL_EMPTY_VALUE, deepCopy, NodeHelpers, UnexpectedError } from 'n8n-workflow';
 
+import { CredentialsFinderService } from './credentials-finder.service';
+
 import { CREDENTIAL_BLANKING_VALUE } from '@/constants';
 import { CredentialTypes } from '@/credential-types';
 import { createCredentialsFromCredentialsEntity } from '@/credentials-helper';
-import { UserRepository } from '@/databases/repositories/user.repository';
-import * as Db from '@/db';
 import { BadRequestError } from '@/errors/response-errors/bad-request.error';
 import { NotFoundError } from '@/errors/response-errors/not-found.error';
 import { ExternalHooks } from '@/external-hooks';
@@ -40,8 +42,6 @@ import { CredentialsTester } from '@/services/credentials-tester.service';
 import { OwnershipService } from '@/services/ownership.service';
 import { ProjectService } from '@/services/project.service.ee';
 import { RoleService } from '@/services/role.service';
-
-import { CredentialsFinderService } from './credentials-finder.service';
 
 export type CredentialsGetSharedOptions =
 	| { allowGlobalScope: true; globalScope: Scope }
@@ -299,7 +299,7 @@ export class CredentialsService {
 				role: 'credential:owner',
 				project: {
 					projectRelations: {
-						role: 'project:personalOwner',
+						role: { slug: PROJECT_OWNER_ROLE_SLUG },
 						userId: user.id,
 					},
 				},
@@ -387,6 +387,7 @@ export class CredentialsService {
 		await this.externalHooks.run('credentials.update', [newCredentialData]);
 
 		// Update the credentials in DB
+		// @ts-ignore CAT-957
 		await this.credentialsRepository.update(credentialId, newCredentialData);
 
 		// We sadly get nothing back from "update". Neither if it updated a record
@@ -406,7 +407,8 @@ export class CredentialsService {
 
 		await this.externalHooks.run('credentials.create', [encryptedData]);
 
-		const result = await Db.transaction(async (transactionManager) => {
+		const { manager: dbManager } = this.credentialsRepository;
+		const result = await dbManager.transaction(async (transactionManager) => {
 			const savedCredential = await transactionManager.save<CredentialsEntity>(newCredential);
 
 			savedCredential.data = newCredential.data;
